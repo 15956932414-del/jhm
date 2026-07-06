@@ -1,32 +1,24 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-/// 加密工具类 — 与原项目 C# DES 加密完全兼容
+/// 加密工具类 — 与 C# DESCryptoServiceProvider (CBC, IV=key) 完全兼容
 class RegisterHelper {
-  /// DES 加密 — 兼容 C# DESCryptoServiceProvider
+  /// DES 加密 — CBC 模式，IV=密钥前8字节 — 兼容 C# DESCryptoServiceProvider
   static String encrypt(String key, String str) {
     try {
-      // 使用 Unicode 编码（Little Endian UTF-16）— 兼容 C# Encoding.Unicode
+      // Unicode 编码（Little Endian UTF-16）— 兼容 C# Encoding.Unicode
       final keyBytes = _unicodeEncode(key);
       final dataBytes = _unicodeEncode(str);
 
-      // DES 使用前 8 字节作为密钥
+      // DES 密钥和 IV 均为前 8 字节（兼容 C# CreateEncryptor(key, key)）
       final desKey = keyBytes.sublist(0, 8);
-
-      // 创建 DES 加密器，ECB 模式
-      final cipher = DESBlockCipher();
-      cipher.init(true, desKey);
+      final iv = keyBytes.sublist(0, 8);
 
       // PKCS7 填充
       final paddedData = _pkcs7Pad(dataBytes, 8);
 
-      // 加密
-      final encrypted = Uint8List(paddedData.length);
-      for (var i = 0; i < paddedData.length; i += 8) {
-        final block = paddedData.sublist(i, i + 8);
-        final encryptedBlock = cipher.processBlock(block);
-        encrypted.setRange(i, i + 8, encryptedBlock);
-      }
+      // CBC 模式加密
+      final encrypted = _cbcEncrypt(desKey, iv, paddedData);
 
       return base64Encode(encrypted);
     } catch (e) {
@@ -34,27 +26,19 @@ class RegisterHelper {
     }
   }
 
-  /// DES 解密 — 兼容 C# DESCryptoServiceProvider
+  /// DES 解密 — CBC 模式，IV=密钥前8字节 — 兼容 C# DESCryptoServiceProvider
   static String decrypt(String key, String str) {
     try {
-      // 使用 Unicode 编码（Little Endian UTF-16）
+      // Unicode 编码（Little Endian UTF-16）
       final keyBytes = _unicodeEncode(key);
       final dataBytes = base64Decode(str);
 
-      // DES 使用前 8 字节作为密钥
+      // DES 密钥和 IV 均为前 8 字节
       final desKey = keyBytes.sublist(0, 8);
+      final iv = keyBytes.sublist(0, 8);
 
-      // 创建 DES 解密器，ECB 模式
-      final cipher = DESBlockCipher();
-      cipher.init(false, desKey);
-
-      // 解密
-      final decrypted = Uint8List(dataBytes.length);
-      for (var i = 0; i < dataBytes.length; i += 8) {
-        final block = dataBytes.sublist(i, i + 8);
-        final decryptedBlock = cipher.processBlock(block);
-        decrypted.setRange(i, i + 8, decryptedBlock);
-      }
+      // CBC 模式解密
+      final decrypted = _cbcDecrypt(desKey, iv, dataBytes);
 
       // 移除 PKCS7 填充
       final unpadded = _pkcs7Unpad(decrypted);
@@ -66,12 +50,66 @@ class RegisterHelper {
   }
 
   /// 根据机器码生成激活码
-  /// 格式：机器码&过期时间&注册时间 → DES加密 → Base64
+  /// 格式：机器码&过期时间&注册时间 → DES CBC 加密 → Base64
   static String createRegisterCode(
       String key, String machineCode, DateTime overTime) {
+    // 使用 C# DateTime.ToString("s") 格式: yyyy-MM-ddTHH:mm:ss（无毫秒）
     final finalCode =
-        '$machineCode&${overTime.toIso8601String()}&${DateTime.now().toIso8601String()}';
+        '$machineCode&${_formatSortable(overTime)}&${_formatSortable(DateTime.now())}';
     return encrypt(key, finalCode);
+  }
+
+  /// 格式化为 C# DateTime.ToString("s") 兼容格式 (yyyy-MM-ddTHH:mm:ss)
+  static String _formatSortable(DateTime dt) {
+    final y = dt.year.toString().padLeft(4, '0');
+    final mo = dt.month.toString().padLeft(2, '0');
+    final d = dt.day.toString().padLeft(2, '0');
+    final h = dt.hour.toString().padLeft(2, '0');
+    final mi = dt.minute.toString().padLeft(2, '0');
+    final s = dt.second.toString().padLeft(2, '0');
+    return '$y-$mo-${d}T$h:$mi:$s';
+  }
+
+  /// CBC 模式加密（底层使用 ECB 分组密码）
+  static Uint8List _cbcEncrypt(List<int> key, List<int> iv, Uint8List data) {
+    final cipher = DESBlockCipher();
+    cipher.init(true, key);
+
+    final result = Uint8List(data.length);
+    var previous = Uint8List.fromList(iv);
+
+    for (var i = 0; i < data.length; i += 8) {
+      final block = data.sublist(i, i + 8);
+      // XOR with previous ciphertext (or IV for first block)
+      final xored = Uint8List(8);
+      for (var j = 0; j < 8; j++) {
+        xored[j] = block[j] ^ previous[j];
+      }
+      final encryptedBlock = cipher.processBlock(xored);
+      result.setRange(i, i + 8, encryptedBlock);
+      previous = encryptedBlock;
+    }
+    return result;
+  }
+
+  /// CBC 模式解密（底层使用 ECB 分组密码）
+  static Uint8List _cbcDecrypt(List<int> key, List<int> iv, Uint8List data) {
+    final cipher = DESBlockCipher();
+    cipher.init(false, key);
+
+    final result = Uint8List(data.length);
+    var previous = Uint8List.fromList(iv);
+
+    for (var i = 0; i < data.length; i += 8) {
+      final block = data.sublist(i, i + 8);
+      final decryptedBlock = cipher.processBlock(block);
+      // XOR with previous ciphertext (or IV for first block)
+      for (var j = 0; j < 8; j++) {
+        result[i + j] = decryptedBlock[j] ^ previous[j];
+      }
+      previous = block; // use ciphertext, not plaintext
+    }
+    return result;
   }
 
   /// 解密激活码，返回明文内容
