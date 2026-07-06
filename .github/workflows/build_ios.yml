@@ -3,7 +3,7 @@ name: Build iOS IPA
 on:
   push:
     branches: [main]
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -16,17 +16,24 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: 'master'  # 对应本地 Flutter 3.45.0 + Dart 3.11.0
+          channel: 'master'
 
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Build iOS IPA (Release, unsigned)
-        run: flutter build ipa --release --no-codesign
+      - name: Build iOS (Release, unsigned)
+        run: flutter build ios --release --no-codesign
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/ios/Release-iphoneos/Runner.app Payload/
+          zip -r Runner.ipa Payload/
+          ls -lh Runner.ipa
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: ios-ipa
-          path: build/ios/ipa/*.ipa
+          path: Runner.ipa
           retention-days: 7
